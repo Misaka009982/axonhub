@@ -221,7 +221,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.name", "AxonHub")
 	v.SetDefault("server.base_path", "")
 	v.SetDefault("server.request_timeout", "30s")
-	v.SetDefault("server.llm_request_timeout", "600s")
+	// LLM requests may legitimately outlive the first streaming event (long
+	// generations), so the default ceiling is generous. Set to 0 to disable the
+	// server-imposed LLM request timeout entirely.
+	v.SetDefault("server.llm_request_timeout", "3600s")
 	v.SetDefault("server.sse_keep_alive.enabled", false)
 	v.SetDefault("server.sse_keep_alive.interval", "15s")
 	v.SetDefault("server.trace.thread_header", "AH-Thread-Id")

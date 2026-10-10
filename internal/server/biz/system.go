@@ -33,7 +33,6 @@ import (
 const (
 	legacyQuotaEnforcementSettingsKey = "quota_enforcement_settings"
 
-	maxRetryResponseTimeoutSeconds  = 600
 	maxChannelSettingUpdateAttempts = 5
 )
 
@@ -306,10 +305,12 @@ type RetryPolicy struct {
 	// RetryDelayMs defines the delay between retries in milliseconds
 	RetryDelayMs int `json:"retry_delay_ms"`
 	// StreamFirstEventTimeoutSeconds defines the timeout for the first streaming response event in seconds.
-	// Set to 0 to disable. Values above 600 seconds are clamped.
+	// Set to 0 to disable. There is no upper bound; the effective ceiling is the
+	// server-level llm_request_timeout (AXONHUB_SERVER_LLM_REQUEST_TIMEOUT).
 	StreamFirstEventTimeoutSeconds int `json:"stream_first_event_timeout_seconds"`
 	// NonStreamResponseTimeoutSeconds defines the timeout for non-streaming responses in seconds.
-	// Set to 0 to disable. Values above 600 seconds are clamped.
+	// Set to 0 to disable. There is no upper bound; the effective ceiling is the
+	// server-level llm_request_timeout (AXONHUB_SERVER_LLM_REQUEST_TIMEOUT).
 	NonStreamResponseTimeoutSeconds int `json:"non_stream_response_timeout_seconds"`
 	// LoadBalancerStrategy defines which channel load balancer strategy to use.
 	// Supported values: "adaptive", "failover", "circuit-breaker", "round-robin".
@@ -1129,18 +1130,15 @@ func normalizeRetryPolicy(policy *RetryPolicy) {
 		policy.TraceStickyMode = defaultRetryPolicy.TraceStickyMode
 	}
 
+	// Negative values mean "disabled". Values above the historical 600s bound are
+	// now honored as-is; the only remaining ceiling is the server-level
+	// llm_request_timeout applied to the whole request.
 	if policy.StreamFirstEventTimeoutSeconds < 0 {
 		policy.StreamFirstEventTimeoutSeconds = 0
-	}
-	if policy.StreamFirstEventTimeoutSeconds > maxRetryResponseTimeoutSeconds {
-		policy.StreamFirstEventTimeoutSeconds = maxRetryResponseTimeoutSeconds
 	}
 
 	if policy.NonStreamResponseTimeoutSeconds < 0 {
 		policy.NonStreamResponseTimeoutSeconds = 0
-	}
-	if policy.NonStreamResponseTimeoutSeconds > maxRetryResponseTimeoutSeconds {
-		policy.NonStreamResponseTimeoutSeconds = maxRetryResponseTimeoutSeconds
 	}
 
 	if len(policy.AutoDisableChannel.Rules) == 0 && len(policy.AutoDisableChannel.Statuses) > 0 {

@@ -69,11 +69,14 @@ func (srv *Server) Run() error {
 		log.Int("port", srv.Config.Port),
 	)
 	addr := fmt.Sprintf("%s:%d", srv.Config.Host, srv.Config.Port)
+	// A non-positive WriteTimeout means "no write deadline" in net/http, which is
+	// what we want when the LLM request timeout is explicitly disabled (0).
+	writeTimeout := max(srv.Config.RequestTimeout, srv.Config.LLMRequestTimeout)
 	srv.server = &http.Server{
 		Addr:         addr,
 		Handler:      srv.Engine,
 		ReadTimeout:  srv.Config.ReadTimeout,
-		WriteTimeout: max(srv.Config.RequestTimeout, srv.Config.LLMRequestTimeout),
+		WriteTimeout: writeTimeout,
 	}
 	srv.addr = addr
 
