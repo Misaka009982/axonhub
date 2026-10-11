@@ -124,6 +124,40 @@ func TestTraceExtractionDefaultsToEnabled(t *testing.T) {
 	}
 }
 
+func TestLLMRequestTimeoutConfig(t *testing.T) {
+	t.Setenv("AXONHUB_SERVER_REQUEST_TIMEOUT", "")
+
+	tests := []struct {
+		name   string
+		config string
+		env    string
+		want   time.Duration
+	}{
+		{name: "default", want: time.Hour},
+		{name: "explicit legacy value", config: "server:\n  llm_request_timeout: 600s\n", want: 600 * time.Second},
+		{name: "above historical ceiling", config: "server:\n  llm_request_timeout: 900s\n", want: 900 * time.Second},
+		{name: "disabled in config", config: "server:\n  llm_request_timeout: 0s\n", want: 0},
+		{name: "environment disables config timeout", config: "server:\n  llm_request_timeout: 600s\n", env: "0", want: 0},
+		{name: "environment extends config timeout", config: "server:\n  llm_request_timeout: 600s\n", env: "7200s", want: 2 * time.Hour},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AXONHUB_SERVER_LLM_REQUEST_TIMEOUT", tt.env)
+			cfg, _, err := loadConfig(writeTestConfig(t, tt.config))
+			if err != nil {
+				t.Fatalf("loadConfig() error = %v", err)
+			}
+			if cfg.APIServer.LLMRequestTimeout != tt.want {
+				t.Fatalf("LLM总时限 = %s，期望 %s", cfg.APIServer.LLMRequestTimeout, tt.want)
+			}
+			if cfg.APIServer.RequestTimeout != 30*time.Second {
+				t.Fatalf("管理请求超时 = %s，期望 30s", cfg.APIServer.RequestTimeout)
+			}
+		})
+	}
+}
+
 func writeTestConfig(t *testing.T, contents string) string {
 	t.Helper()
 

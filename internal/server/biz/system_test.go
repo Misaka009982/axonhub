@@ -1373,6 +1373,33 @@ func TestSystemService_InjectUsageCostEnabled(t *testing.T) {
 	require.False(t, got)
 }
 
+func TestNormalizeRetryPolicy_ResponseTimeouts(t *testing.T) {
+	tests := []struct {
+		name  string
+		value int
+		want  int
+	}{
+		{name: "negative disables", value: -1, want: 0},
+		{name: "zero disables", value: 0, want: 0},
+		{name: "historical ceiling", value: 600, want: 600},
+		{name: "above historical ceiling", value: 601, want: 601},
+		{name: "long wait", value: 900, want: 900},
+		{name: "above default request deadline", value: 7200, want: 7200},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := &RetryPolicy{
+				StreamFirstEventTimeoutSeconds:  tt.value,
+				NonStreamResponseTimeoutSeconds: tt.value,
+			}
+			normalizeRetryPolicy(policy)
+			require.Equal(t, tt.want, policy.StreamFirstEventTimeoutSeconds)
+			require.Equal(t, tt.want, policy.NonStreamResponseTimeoutSeconds)
+		})
+	}
+}
+
 func TestNormalizeRetryPolicy_LoadBalancerStrategy(t *testing.T) {
 	t.Run("invalid strategy falls back to default", func(t *testing.T) {
 		policy := &RetryPolicy{LoadBalancerStrategy: "unknown"}

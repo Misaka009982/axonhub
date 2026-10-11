@@ -13,7 +13,10 @@ server:
   base_path: ""                 # Base path for API routes (env: AXONHUB_SERVER_BASE_PATH)
   # pid_file: "~/.config/axonhub/axonhub.pid"  # PID file for axonhub reload (env: AXONHUB_SERVER_PID_FILE)
   request_timeout: "30s"        # Request timeout duration (env: AXONHUB_SERVER_REQUEST_TIMEOUT)
-  llm_request_timeout: "3600s"  # LLM request timeout duration; set to 0 to disable (env: AXONHUB_SERVER_LLM_REQUEST_TIMEOUT)
+  # 整个 LLM 请求（含流式输出、重试）的总时限，不是首字等待时间。
+  # 设为 0 关闭本机总时限；页面的首字/非流式超时为 0 不会关闭这一层。
+  # 已有配置不会随源码默认值升级；环境变量优先。修改后需重建/重启应用容器。
+  llm_request_timeout: "3600s"  # (env: AXONHUB_SERVER_LLM_REQUEST_TIMEOUT)
   sse_keep_alive:
     enabled: false               # Send API-compatible heartbeats while an SSE stream is idle (env: AXONHUB_SERVER_SSE_KEEP_ALIVE_ENABLED)
     interval: "15s"              # Idle duration between heartbeats (env: AXONHUB_SERVER_SSE_KEEP_ALIVE_INTERVAL)

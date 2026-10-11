@@ -63,15 +63,16 @@ type Server struct {
 }
 
 func (srv *Server) Run() error {
+	writeTimeout := srv.Config.writeTimeout()
 	log.Info(context.Background(), "run server",
 		log.String("name", srv.Config.Name),
 		log.String("host", srv.Config.Host),
 		log.Int("port", srv.Config.Port),
+		log.Duration("request_timeout", srv.Config.RequestTimeout),
+		log.Duration("llm_request_timeout", srv.Config.LLMRequestTimeout),
+		log.Duration("write_timeout", writeTimeout),
 	)
 	addr := fmt.Sprintf("%s:%d", srv.Config.Host, srv.Config.Port)
-	// A non-positive WriteTimeout means "no write deadline" in net/http, which is
-	// what we want when the LLM request timeout is explicitly disabled (0).
-	writeTimeout := max(srv.Config.RequestTimeout, srv.Config.LLMRequestTimeout)
 	srv.server = &http.Server{
 		Addr:         addr,
 		Handler:      srv.Engine,
