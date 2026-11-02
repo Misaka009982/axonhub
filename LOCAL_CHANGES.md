@@ -184,7 +184,14 @@ grep -n "ts <= 0" internal/server/middleware/timeout.go
 # 6. 全局写时限是否保留 0 值语义，以及运行值和超时来源日志
 grep -n "writeTimeout\|request_timeout" internal/server/config.go internal/server/server.go internal/server/middleware/timeout.go
 
-# 7. 确认改动清单
+# 7. 渠道级响应超时是否又被钳到 600
+grep -rn "maxRetryResponseTimeoutSeconds" internal/server/biz/channel_response_timeout.go
+
+# 8. 前端渠道超时上限与文案
+grep -n "RESPONSE_TIMEOUT_MAX_SECONDS" frontend/src/config/retry-policy.ts
+grep -rn "0 到 600\|0 and 600" frontend/src/locales/en/channels.json frontend/src/locales/zh-CN/channels.json
+
+# 9. 确认改动清单
 git status --short
 ```
 
@@ -222,11 +229,31 @@ environment:
 - `deploy/nginx.conf` 里 `location /v1/` 仍有 `proxy_read_timeout 600s`。
   这是**上游连续无数据的读取间隔**，不是固定的请求总时长；如有长时间静默，需要部署者单独调整。
 - 上游若给 `RetryPolicy` 加了新的钳制逻辑，注意别把这次的放开又覆盖回去。
+- **渠道级响应超时（beta12 新增）** 同样不能用 600 挡：`internal/server/biz/channel_response_timeout.go` 的 `validateResponseTimeoutSeconds` 只校验 `>= 0`，前端 `frontend/src/config/retry-policy.ts` 的 `RESPONSE_TIMEOUT_MAX_SECONDS` 只作输入提示（当前 `86400`），`channels-action-dialog.tsx` 的 `parseResponseTimeoutSeconds` 不得再用它拒绝输入。
+- 渠道响应超时前端还有两处文案/常量会随上游同步回归，同步后请重新执行下方核对清单第 8、9 项。
+
+---
+
+## 渠道级响应超时（beta12 起同步维护）
+
+上游在 `v1.0.0-beta12` 引入了按渠道覆盖响应超时（`feat(channels): support per-channel response timeout override`），它与全局两项共享同一个 600 上限，因此同样需要放开：
+
+| 位置 | beta12 原样 | 本 fork |
+|---|---|---|
+| `internal/server/biz/channel_response_timeout.go` | `*seconds > maxRetryResponseTimeoutSeconds` → 报错 | 只校验 `>= 0`，无上限 |
+| 同文件 `NormalizeResponseTimeout` 注释 | 提到 `0..600` 边界 | 改为仅提示负值非法 |
+| `frontend/src/config/retry-policy.ts` | `RESPONSE_TIMEOUT_MAX_SECONDS = 600` | `= 86400`，仅作输入提示 |
+| `frontend/src/features/channels/components/channels-action-dialog.tsx` | `parseResponseTimeoutSeconds` 超上限返回 `undefined` | 去掉上限判断 |
+| `frontend/src/locales/{en,zh-CN}/channels.json` | `responseTimeout.validation` 写 `0 到 600` | 去掉 600 |
+| `internal/server/biz/channel_response_timeout_test.go` | 用 `601` 断言拒绝 | 改为断言 **接受** 601/7200，用 `-1` 断言拒绝 |
+
+语义保持与全局一致：`0` = 关闭该计时器，非负值照填；真正的天花板仍是 `server.llm_request_timeout`。
 
 ---
 
 ## 分支说明
 
 - 本 fork 上游分支为 `unstable`；本改动推送到新建的 `main` 分支。
-- `main` 基线下沉在 `v1.0.0-beta11`（`b8bb3421`），**不含** beta11 之后的 4 个提交。
-  后续如需对齐上游，可 `git rebase`/`merge origin/unstable`。
+- `main` 已 merge `v1.0.0-beta12`（`2b1a0f93`），基线为 `v1.0.0-beta11`（`b8bb3421`）。
+  后续如需对齐上游，可 `git merge origin/unstable` 或新 tag，按本文核对清单确认改动未被覆盖。
+- 注意：上游 `internal/build/VERSION` 自 beta9 起未再更新（beta12 中仍写着 `v1.0.0-beta9`），**不要**用该文件判断版本。
