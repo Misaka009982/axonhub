@@ -5,7 +5,8 @@
 >
 > 上游仓库：`https://github.com/looplj/axonhub`（默认分支 `unstable`）
 > 本 fork：`https://github.com/Misaka009982/axonhub`
-> 基线版本：`v1.0.0-beta11`（commit `b8bb3421`）
+> 定制起点：`v1.0.0-beta11`（commit `b8bb3421`）
+> 当前同步版本：`v1.0.0-rc1`（commit `d2935453`），从本地基线 `bf178190` 合并
 
 ---
 
@@ -253,7 +254,39 @@ environment:
 
 ## 分支说明
 
-- 本 fork 上游分支为 `unstable`；本改动推送到新建的 `main` 分支。
-- `main` 已 merge `v1.0.0-beta12`（`2b1a0f93`），基线为 `v1.0.0-beta11`（`b8bb3421`）。
-  后续如需对齐上游，可 `git merge origin/unstable` 或新 tag，按本文核对清单确认改动未被覆盖。
-- 注意：上游 `internal/build/VERSION` 自 beta9 起未再更新（beta12 中仍写着 `v1.0.0-beta9`），**不要**用该文件判断版本。
+- 本 fork 上游分支为 `unstable`；本地定制维护在 `main` 分支。
+- 本次从 `bf178190c8ecccc5561947ad5c9417a3c784764e`（已合并 beta12）同步正式标签 `v1.0.0-rc1`（`d2935453d23cb1886350a3d1b15f777038af3230`），保留该基线的超时定制。
+- `origin` 指向本 fork；同步上游时先从 `https://github.com/looplj/axonhub.git` 获取指定标签，再合并该标签，避免把 fork 的旧 `unstable` 当作最新上游。
+- 上游 `internal/build/VERSION` 在 rc1 中仍写着 `v1.0.0-beta9`；本次沿用上游文件，使用标签和提交判断源码版本。
+
+---
+
+## rc1 同步与撤销记录（2026-11-10）
+
+按用户要求，本次从 `bf178190` 重新建立同步历史，不合入下面两个提交：
+
+| 提交 | 取消的本地改动 |
+|---|---|
+| `b68c57a3e8618217de5cc7076a2d40af0ba45de5` | 请求记录创建前移、入站失败兜底记录、当时增加的运行期清理及测试 |
+| `e38f073bc177a25795bae5e71b5beedfa63b945a` | 独立请求阶段诊断、`request_diagnostics` 配置、监测和测试，以及对前一次补丁的纠正 |
+
+两提交的最终净变化整体移除；请求处理、持久化和流处理采用 rc1 的上游实现。上游已有的功能按上游保留，不按相似名称删除。
+
+仍保留本文列出的超时定制：全局及渠道响应超时支持超过 `600s`、默认 LLM 总时限 `3600s`、非正值关闭本机对应时限、共享写时限的 `0` 语义，以及启动超时字段和 `server_request_timeout` 来源日志。最后两项来自更早的 `f8a47dc8`，不属于本次撤销的独立请求阶段诊断。
+
+### 本地备份
+
+同步前工作区干净，原 `main` 为 `e38f073b`。已创建：
+
+- 本地备份分支：`backup/pre-rc1-e38f073b`。
+- 仓库外备份目录：`D:/Project/axonhub/backups/pre-rc1-e38f073b/`。
+- 完整历史 `axonhub-pre-rc1.bundle`，已通过 `git bundle verify`，无前置提交依赖。
+- `patches/` 中的两个独立提交补丁、`removed-changes.patch` 中的最终净变化，以及 `LOCAL_CHANGES.before-rc1.md` 原备忘录。
+- 备份目录的 `README.md` 包含提交全名、SHA-256、恢复命令和同步结果；备份文件仅保存在本地，不随 `main` 推送。
+
+### 升级与核对
+
+- rc1 已包含请求设置快照、减少持久化读回、429 冷却与重试等上游改进；本次完整吸收，不宣称它们已解决此前现场的上传中断或慢读。
+- 先前部署的 `AXONHUB_SERVER_REQUEST_DIAGNOSTICS=true` / `server.request_diagnostics` 不再启用那组诊断；下次修改部署配置时可移除。本文未改动部署端文件或环境变量。
+- 静态核对被取消的诊断、兜底及定时清理代码无残留；对应业务文件与 rc1 一致，保留的超时文件逐项复核。
+- 验证仅包含 Git 差异、合并结构、UTF-8、JSON 及源码检查；沿用现有超时回归用例，未编译、运行测试、安装依赖或部署。
