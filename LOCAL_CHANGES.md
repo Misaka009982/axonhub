@@ -6,7 +6,7 @@
 > 上游仓库：`https://github.com/looplj/axonhub`（默认分支 `unstable`）
 > 本 fork：`https://github.com/Misaka009982/axonhub`
 > 定制起点：`v1.0.0-beta11`（commit `b8bb3421`）
-> 当前同步版本：`v1.0.0-rc1`（commit `d2935453`），从本地基线 `bf178190` 合并
+> 当前同步版本：`v1.0.0-rc2`（commit `59bb6734`），从本地 rc1 提交 `c2e483af` 继续合并
 
 ---
 
@@ -160,6 +160,12 @@ func (c Config) writeTimeout() time.Duration {
 
 本次只做静态审查，未运行以上测试；上游同步后应由维护者执行。
 
+### 9. `internal/build/VERSION`
+
+从 rc2 起，每次同步正式标签时，将此文件更新为对应的完整版本号；当前为 `v1.0.0-rc2`。
+
+`internal/build/info.go` 将该文件嵌入为默认版本，`Dockerfile` 也直接读取它并注入 `build.Version`。因此从 `main` 自行构建时，必须同步更新此文件，避免代码已升级但页面和版本接口仍显示 beta9。发布工作流显式注入版本时，仍以注入值为准。
+
 ---
 
 ## 同步上游后的快速核对清单
@@ -192,11 +198,14 @@ grep -rn "maxRetryResponseTimeoutSeconds" internal/server/biz/channel_response_t
 grep -n "RESPONSE_TIMEOUT_MAX_SECONDS" frontend/src/config/retry-policy.ts
 grep -rn "0 到 600\|0 and 600" frontend/src/locales/en/channels.json frontend/src/locales/zh-CN/channels.json
 
-# 9. 确认改动清单
+# 9. 版本文件应与本次同步的正式标签一致
+cat internal/build/VERSION
+
+# 10. 确认改动清单
 git status --short
 ```
 
-第 1～3 项应无匹配；第 4 项应看到 `3600s` 默认值；第 5～6 项应有对应逻辑。不要把“无输出”一律当作失败。
+第 1～3 项应无匹配；第 4 项应看到 `3600s` 默认值；第 5～6 项应有对应逻辑；第 9 项当前应为 `v1.0.0-rc2`。不要把“无输出”一律当作失败。
 
 ---
 
@@ -231,7 +240,7 @@ environment:
   这是**上游连续无数据的读取间隔**，不是固定的请求总时长；如有长时间静默，需要部署者单独调整。
 - 上游若给 `RetryPolicy` 加了新的钳制逻辑，注意别把这次的放开又覆盖回去。
 - **渠道级响应超时（beta12 新增）** 同样不能用 600 挡：`internal/server/biz/channel_response_timeout.go` 的 `validateResponseTimeoutSeconds` 只校验 `>= 0`，前端 `frontend/src/config/retry-policy.ts` 的 `RESPONSE_TIMEOUT_MAX_SECONDS` 只作输入提示（当前 `86400`），`channels-action-dialog.tsx` 的 `parseResponseTimeoutSeconds` 不得再用它拒绝输入。
-- 渠道响应超时前端还有两处文案/常量会随上游同步回归，同步后请重新执行下方核对清单第 8、9 项。
+- 渠道响应超时前端还有两处文案/常量会随上游同步回归，同步后请重新执行上方核对清单第 8 项，并核对版本与 Git 差异。
 
 ---
 
@@ -255,9 +264,9 @@ environment:
 ## 分支说明
 
 - 本 fork 上游分支为 `unstable`；本地定制维护在 `main` 分支。
-- 本次从 `bf178190c8ecccc5561947ad5c9417a3c784764e`（已合并 beta12）同步正式标签 `v1.0.0-rc1`（`d2935453d23cb1886350a3d1b15f777038af3230`），保留该基线的超时定制。
+- 当前从 rc1 合并提交 `c2e483afc5e8b7eaa16313a72969c390593b3366` 继续合并正式标签 `v1.0.0-rc2`（`59bb6734e30d2c8b17ac35f7b1ad6d7b0ad98ac1`），保留现有超时定制和 rc1 的撤销结果。
 - `origin` 指向本 fork；同步上游时先从 `https://github.com/looplj/axonhub.git` 获取指定标签，再合并该标签，避免把 fork 的旧 `unstable` 当作最新上游。
-- 上游 `internal/build/VERSION` 在 rc1 中仍写着 `v1.0.0-beta9`；本次沿用上游文件，使用标签和提交判断源码版本。
+- 上游 `internal/build/VERSION` 在 rc2 中仍写着 `v1.0.0-beta9`；本 fork 已更新为 `v1.0.0-rc2`，今后随同步标签维护，并结合提交核对源码版本。
 
 ---
 
@@ -290,3 +299,15 @@ environment:
 - 先前部署的 `AXONHUB_SERVER_REQUEST_DIAGNOSTICS=true` / `server.request_diagnostics` 不再启用那组诊断；下次修改部署配置时可移除。本文未改动部署端文件或环境变量。
 - 静态核对被取消的诊断、兜底及定时清理代码无残留；对应业务文件与 rc1 一致，保留的超时文件逐项复核。
 - 验证仅包含 Git 差异、合并结构、UTF-8、JSON 及源码检查；沿用现有超时回归用例，未编译、运行测试、安装依赖或部署。
+
+---
+
+## rc2 同步与版本显示
+
+- 同步起点：`c2e483afc5e8b7eaa16313a72969c390593b3366`（本 fork 的 rc1）。
+- 上游目标：`v1.0.0-rc2`，提交 `59bb6734e30d2c8b17ac35f7b1ad6d7b0ad98ac1`。
+- 本地回退分支：`backup/pre-rc2-c2e483af`，固定在同步前的 rc1；原 `backup/pre-rc1-e38f073b` 和仓库外完整备份继续保留。
+- 在现有历史上正常合并 rc2，合并无冲突，不重新纳入 `b68c57a3` / `e38f073b` 的请求补记及独立阶段诊断。
+- 吸收上游桌面端、渠道模型别名预览、Responses/Gemini 工具结果兼容性修复和依赖更新；保留本 fork 的超时定制。
+- 本次额外改动为 `internal/build/VERSION` 更新至 `v1.0.0-rc2`，以及本备忘录的版本维护规则。今后同步时同样更新版本文件。
+- 验证采用静态源码、定制补丁一致性、版本文件、UTF-8/JSON 和 Git 差异检查；本地定制差异检查通过。完整合并检查报告上游两个打包 JavaScript 文件中的 3 处尾随空白，已确认它们与 rc2 原文一致，保持原样。未编译、运行测试、安装依赖或部署。
