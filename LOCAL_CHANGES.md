@@ -166,6 +166,20 @@ func (c Config) writeTimeout() time.Duration {
 
 `internal/build/info.go` 将该文件嵌入为默认版本，`Dockerfile` 也直接读取它并注入 `build.Version`。因此从 `main` 自行构建时，必须同步更新此文件，避免代码已升级但页面和版本接口仍显示 beta9。发布工作流显式注入版本时，仍以注入值为准。
 
+### 10. `Dockerfile` 的 Go 构建镜像
+
+rc3 标签中的主模块、`cmd/schema` 和 `cmd/axonhub-desktop` 要求 Go `1.27.4`，但构建镜像仍为 `golang:1.27.3-alpine3.24`。现场日志确认编译及校验脚本自测成功，随后真实依赖校验报错：
+
+```text
+go: go.mod requires go >= 1.27.4 (running go 1.27.3; GOTOOLCHAIN=local)
+```
+
+原因是官方镜像默认 `GOTOOLCHAIN=local`，`GOTOOLCHAIN=auto go build` 只影响该命令，不会传给 `&&` 后的校验脚本；自测使用模拟的 `go`，也不会检查真实工具链版本。
+
+本 fork 采用 rc3 标签发布后合并的上游 [PR #2983](https://github.com/looplj/axonhub/pull/2983) 中的 Dockerfile 修复，将后端镜像更新为 `golang:1.27.4-alpine3.24`，与模块要求对齐，保留所有依赖校验。这里只同步该文件的版本修正。
+
+后续同步时，核对构建镜像的 Go 版本不低于 `scripts/verify-go-sse-dependency.sh` 遍历的各模块要求；不能仅确认 `go build` 带有自动工具链选项。重建后的日志应继续出现四个模块的 `verified module dependency` 和最终的 `verified production binary dependency`。本次仅做静态核对，实际镜像构建由维护者执行。
+
 ---
 
 ## 同步上游后的快速核对清单
@@ -201,11 +215,15 @@ grep -rn "0 到 600\|0 and 600" frontend/src/locales/en/channels.json frontend/s
 # 9. 版本文件应与本次同步的正式标签一致
 cat internal/build/VERSION
 
-# 10. 确认改动清单
+# 10. Go 构建镜像是否满足所有被校验模块的版本要求
+grep -n '^FROM golang:' Dockerfile
+grep -n '^go ' go.mod llm/go.mod cmd/schema/go.mod cmd/axonhub-desktop/go.mod
+
+# 11. 确认改动清单
 git status --short
 ```
 
-第 1～3 项应无匹配；第 4 项应看到 `3600s` 默认值；第 5～6 项应有对应逻辑；第 9 项当前应为 `v1.0.0-rc.3`。不要把“无输出”一律当作失败。
+第 1～3 项应无匹配；第 4 项应看到 `3600s` 默认值；第 5～6 项应有对应逻辑；第 9 项当前应为 `v1.0.0-rc.3`；第 10 项镜像 Go 版本应满足所有被校验模块的最低要求。不要把“无输出”一律当作失败。
 
 ---
 
