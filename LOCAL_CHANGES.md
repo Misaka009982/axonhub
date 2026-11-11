@@ -6,7 +6,7 @@
 > 上游仓库：`https://github.com/looplj/axonhub`（默认分支 `unstable`）
 > 本 fork：`https://github.com/Misaka009982/axonhub`
 > 定制起点：`v1.0.0-beta11`（commit `b8bb3421`）
-> 当前同步版本：`v1.0.0-rc2`（commit `59bb6734`），从本地 rc1 提交 `c2e483af` 继续合并
+> 当前同步版本：`v1.0.0-rc.3`（commit `e70fb2a2`），从本地 rc2 提交 `58ae5568` 继续合并
 
 ---
 
@@ -162,7 +162,7 @@ func (c Config) writeTimeout() time.Duration {
 
 ### 9. `internal/build/VERSION`
 
-从 rc2 起，每次同步正式标签时，将此文件更新为对应的完整版本号；当前为 `v1.0.0-rc2`。
+从 rc2 起，每次同步正式标签时，将此文件更新为对应的完整版本号；当前为 `v1.0.0-rc.3`。版本拼写以实际标签为准，rc3 的标签在 `rc` 与 `3` 之间带有点号。
 
 `internal/build/info.go` 将该文件嵌入为默认版本，`Dockerfile` 也直接读取它并注入 `build.Version`。因此从 `main` 自行构建时，必须同步更新此文件，避免代码已升级但页面和版本接口仍显示 beta9。发布工作流显式注入版本时，仍以注入值为准。
 
@@ -205,7 +205,7 @@ cat internal/build/VERSION
 git status --short
 ```
 
-第 1～3 项应无匹配；第 4 项应看到 `3600s` 默认值；第 5～6 项应有对应逻辑；第 9 项当前应为 `v1.0.0-rc2`。不要把“无输出”一律当作失败。
+第 1～3 项应无匹配；第 4 项应看到 `3600s` 默认值；第 5～6 项应有对应逻辑；第 9 项当前应为 `v1.0.0-rc.3`。不要把“无输出”一律当作失败。
 
 ---
 
@@ -264,9 +264,9 @@ environment:
 ## 分支说明
 
 - 本 fork 上游分支为 `unstable`；本地定制维护在 `main` 分支。
-- 当前从 rc1 合并提交 `c2e483afc5e8b7eaa16313a72969c390593b3366` 继续合并正式标签 `v1.0.0-rc2`（`59bb6734e30d2c8b17ac35f7b1ad6d7b0ad98ac1`），保留现有超时定制和 rc1 的撤销结果。
+- 当前从 rc2 合并提交 `58ae5568eb6acd7578bfd93f592031945ec1cc92` 继续合并正式标签 `v1.0.0-rc.3`（`e70fb2a2676a0d9374a4665bc52accddd979a4d9`），保留现有超时定制和 rc1 的撤销结果。
 - `origin` 指向本 fork；同步上游时先从 `https://github.com/looplj/axonhub.git` 获取指定标签，再合并该标签，避免把 fork 的旧 `unstable` 当作最新上游。
-- 上游 `internal/build/VERSION` 在 rc2 中仍写着 `v1.0.0-beta9`；本 fork 已更新为 `v1.0.0-rc2`，今后随同步标签维护，并结合提交核对源码版本。
+- 上游 `internal/build/VERSION` 在 rc3 中仍写着 `v1.0.0-beta9`；本 fork 已更新为 `v1.0.0-rc.3`，今后随同步标签维护，并结合提交核对源码版本。
 
 ---
 
@@ -311,3 +311,15 @@ environment:
 - 吸收上游桌面端、渠道模型别名预览、Responses/Gemini 工具结果兼容性修复和依赖更新；保留本 fork 的超时定制。
 - 本次额外改动为 `internal/build/VERSION` 更新至 `v1.0.0-rc2`，以及本备忘录的版本维护规则。今后同步时同样更新版本文件。
 - 验证采用静态源码、定制补丁一致性、版本文件、UTF-8/JSON 和 Git 差异检查；本地定制差异检查通过。完整合并检查报告上游两个打包 JavaScript 文件中的 3 处尾随空白，已确认它们与 rc2 原文一致，保持原样。未编译、运行测试、安装依赖或部署。
+
+---
+
+## rc3 同步记录
+
+- 同步起点：`58ae5568eb6acd7578bfd93f592031945ec1cc92`（本 fork 的 rc2）。
+- 上游目标：`v1.0.0-rc.3`，提交 `e70fb2a2676a0d9374a4665bc52accddd979a4d9`。注意标签含点号，不是 `v1.0.0-rc3`。
+- 本地回退分支：`backup/pre-rc3-58ae5568`，固定在同步前的 rc2；更早的回退分支与 rc1 撤销备份继续保留。
+- 在现有历史上正常合并，合并无冲突；保留超时定制，`internal/build/VERSION` 同步更新为 `v1.0.0-rc.3`。
+- 吸收上游 DeepSeek 额度显示、Trace/Thread 身份缓存、HTTP/2 断流及 GOAWAY 重试、配额回退选路、桌面端和插件页面修复。
+- 上游新加入的身份缓存属于 rc3 原有实现；不重新纳入此前取消的 `b68c57a3` / `e38f073b` 请求补记和独立阶段诊断。
+- 静态核对超时定制补丁、版本读取路径、撤销范围、UTF-8/JSON 和 Git 差异；未编译、运行测试、安装依赖或部署。
