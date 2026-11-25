@@ -1,3 +1,15 @@
+// 职责: 管理模型配置，并通过共享 Model 索引缓存提供模型路由读取。
+// 关联文件:
+//
+//	internal/server/biz/model_catalog_apply.go
+//	internal/server/biz/model_cache.go
+//	internal/server/biz/channel.go
+//	internal/server/orchestrator/candidates.go
+//
+// 注意事项:
+//
+//	缓存读取仍执行 Model 查询权限检查，返回的缓存实体及嵌套配置不可修改。
+
 package biz
 
 import (
@@ -7,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/sql"
 	"github.com/samber/lo"
 	"go.uber.org/fx"
@@ -27,6 +40,9 @@ import (
 type ModelServiceParams struct {
 	fx.In
 
+	Catalog    *CatalogService
+	ModelCache *ModelCacheService
+
 	ChannelService *ChannelService
 	SystemService  *SystemService
 	Ent            *ent.Client
@@ -34,6 +50,8 @@ type ModelServiceParams struct {
 
 func NewModelService(params ModelServiceParams) *ModelService {
 	return &ModelService{
+		catalog:    params.Catalog,
+		modelCache: params.ModelCache,
 		AbstractService: &AbstractService{
 			db: params.Ent,
 		},
@@ -44,6 +62,9 @@ func NewModelService(params ModelServiceParams) *ModelService {
 
 type ModelService struct {
 	*AbstractService
+
+	catalog    *CatalogService
+	modelCache *ModelCacheService
 
 	channelService *ChannelService
 	systemService  *SystemService
@@ -354,6 +375,13 @@ func filterConditionValueToInt64(condition objects.Condition) (int64, bool, erro
 
 // CreateModel creates a new model with the provided input.
 func (svc *ModelService) CreateModel(ctx context.Context, input ent.CreateModelInput) (*ent.Model, error) {
+	return svc.CreateModelWithPriceEdits(ctx, input, nil)
+}
+
+func (svc *ModelService) CreateModelWithPriceEdits(ctx context.Context, input ent.CreateModelInput, edits []ManualPriceEdit) (*ent.Model, error) {
+	if err := applyManualPriceEdits(input.ModelCard, edits); err != nil {
+		return nil, err
+	}
 	// Validate regex patterns in settings if provided
 	if input.Settings != nil {
 		if err := svc.validateModelSettings(input.Settings); err != nil {
@@ -457,6 +485,36 @@ func (svc *ModelService) BulkCreateModels(ctx context.Context, inputs []*ent.Cre
 
 // UpdateModel updates an existing model with the provided input.
 func (svc *ModelService) UpdateModel(ctx context.Context, id int, input *ent.UpdateModelInput) (*ent.Model, error) {
+	return svc.UpdateModelWithPriceEdits(ctx, id, input, nil, nil)
+}
+
+func (svc *ModelService) UpdateModelWithPriceEdits(ctx context.Context, id int, input *ent.UpdateModelInput, edited []ManualPriceEdit, expected *string) (*ent.Model, error) {
+	var updated *ent.Model
+	outerTx := ent.TxFromContext(ctx)
+	var unwrap bool
+	err := svc.RunInTransaction(ctx, func(ctx context.Context) error {
+		unwrap = outerTx == nil && ent.TxFromContext(ctx) != nil
+		var err error
+		updated, err = svc.updateModel(ctx, id, input, edited, expected)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if unwrap {
+		updated.Unwrap()
+	}
+	return updated, nil
+}
+
+func lockedModel(ctx context.Context, db *ent.Client, query *ent.ModelQuery) (*ent.Model, error) {
+	if db.Driver().Dialect() != dialect.SQLite {
+		query.Modify(func(s *sql.Selector) { s.ForUpdate() })
+	}
+	return query.Only(ctx)
+}
+
+func (svc *ModelService) updateModel(ctx context.Context, id int, input *ent.UpdateModelInput, edited []ManualPriceEdit, expected *string) (*ent.Model, error) {
 	// Validate regex patterns in settings if provided
 	if input.Settings != nil {
 		if err := svc.validateModelSettings(input.Settings); err != nil {
@@ -473,8 +531,36 @@ func (svc *ModelService) UpdateModel(ctx context.Context, id int, input *ent.Upd
 		SetNillableStatus(input.Status).
 		SetNillableIcon(input.Icon)
 
-	if input.ModelCard != nil {
-		mut.SetModelCard(input.ModelCard)
+	if len(edited) > 0 && input.ModelCard == nil {
+		return nil, xerrors.ValidationError("price edits require a model card")
+	}
+	if input.ModelCard != nil || expected != nil {
+		if err := model.Policy.EvalMutation(ctx, mut.Mutation()); err != nil {
+			return nil, err
+		}
+		original, err := authz.RunAsHost(ctx, svc.entFromContext(ctx), "preserve-model-reference-prices", func(ctx context.Context) (*ent.Model, error) {
+			db := ent.FromContext(ctx)
+			return lockedModel(ctx, db, db.Model.Query().Where(model.IDEQ(id)))
+		})
+		if err != nil {
+			return nil, err
+		}
+		if expected != nil {
+			version, err := ModelEditVersion(original)
+			if err != nil {
+				return nil, err
+			}
+			if version != *expected {
+				return nil, xerrors.ValidationError("model changed since it was opened")
+			}
+		}
+		if input.ModelCard != nil {
+			preserveCatalogPrices(original.ModelCard, input.ModelCard)
+			if err := applyManualPriceEdits(input.ModelCard, edited); err != nil {
+				return nil, err
+			}
+			mut.SetModelCard(input.ModelCard)
+		}
 	}
 
 	if input.Settings != nil {
@@ -595,14 +681,21 @@ func (svc *ModelService) QueryModelChannelConnections(ctx context.Context, assoc
 	})), nil
 }
 
-// GetModelByModelID retrieves a model by its modelId and status.
+// GetModelByModelID retrieves a read-only model by its modelId and status.
+// Callers must not mutate the entity or its nested settings/model card.
 func (svc *ModelService) GetModelByModelID(ctx context.Context, modelID string, status model.Status) (*ent.Model, error) {
-	return svc.entFromContext(ctx).Model.Query().
-		Where(
-			model.ModelID(modelID),
-			model.StatusEQ(status),
-		).
-		First(ctx)
+	client := svc.entFromContext(ctx)
+	if err := model.Policy.EvalQuery(ctx, client.Model.Query()); err != nil {
+		return nil, err
+	}
+	item, err := svc.modelCache.get(ctx, client, modelID)
+	if err != nil {
+		return nil, err
+	}
+	if item.Status != status {
+		return nil, &ent.NotFoundError{}
+	}
+	return item, nil
 }
 
 // ListModels retrieves all models that have explicit Model entity configuration.
@@ -933,7 +1026,8 @@ func findUnassociatedChannels(channels []*ent.Channel, associations []*objects.M
 }
 
 type ModelIdentify struct {
-	ID string `json:"id"`
+	ID      string              `json:"id"`
+	Pricing *objects.ModelPrice `json:"pricing,omitempty"`
 }
 
 type UnassociatedChannel struct {

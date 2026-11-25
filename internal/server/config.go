@@ -93,9 +93,17 @@ type Config struct {
 	// RequestTimeout 是普通请求的总处理时限；非正值表示不设置此时限。
 	RequestTimeout time.Duration `conf:"request_timeout" yaml:"request_timeout" json:"request_timeout"`
 
-	// LLMRequestTimeout 是整个 LLM 请求（含流式输出和重试）的总时限，不是首字超时。
-	// 非正值表示不设置此时限；客户端取消和上游自身的超时仍然有效。
+	// LLMRequestTimeout 是非流式 LLM 请求的总时限，不是首字超时。
+	// 流式总时限未单独配置时继承此值；0 禁用本机总时限，父级取消仍有效。
 	LLMRequestTimeout time.Duration `conf:"llm_request_timeout" yaml:"llm_request_timeout" json:"llm_request_timeout"`
+
+	// LLMStreamRequestTimeout 是流式 LLM 请求（含重试）的总时限。
+	// 配置加载时默认继承 LLMRequestTimeout；显式设为 0 禁用流式总时限。
+	LLMStreamRequestTimeout time.Duration `conf:"llm_stream_request_timeout" yaml:"llm_stream_request_timeout" json:"llm_stream_request_timeout"`
+
+	// LLMStreamIdleTimeout 限制上游流连续无数据的间隔，默认 0 表示关闭。
+	// 下游 SSE 心跳不会重置此计时器。
+	LLMStreamIdleTimeout time.Duration `conf:"llm_stream_idle_timeout" yaml:"llm_stream_idle_timeout" json:"llm_stream_idle_timeout"`
 
 	Safeguards safeguards.Config `conf:"safeguards" yaml:"safeguards" json:"safeguards"`
 
@@ -120,11 +128,11 @@ type Config struct {
 // writeTimeout 返回共享 HTTP 服务的写时限。任一类请求允许无限等待时，
 // 不能用另一类请求的有限时限重新限制它；路由 context 和 SSE 单次写保护仍独立生效。
 func (c Config) writeTimeout() time.Duration {
-	if c.RequestTimeout <= 0 || c.LLMRequestTimeout <= 0 {
+	if c.RequestTimeout <= 0 || c.LLMRequestTimeout <= 0 || c.LLMStreamRequestTimeout <= 0 {
 		return 0
 	}
 
-	return max(c.RequestTimeout, c.LLMRequestTimeout)
+	return max(c.RequestTimeout, c.LLMRequestTimeout, c.LLMStreamRequestTimeout)
 }
 
 type SSEKeepAlive struct {

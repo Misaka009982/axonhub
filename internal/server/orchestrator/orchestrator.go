@@ -354,7 +354,11 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		// so persistence and execution observe the same provider request.
 		verifyResponsesAttempt(outbound),
 		finalizeTransportRequest(outbound),
-
+	)
+	if link, ok := ctx.Value(guardianLinkageKey{}).(guardianLinkage); ok {
+		middlewares = append(middlewares, &guardianLinkageMiddleware{link: link, outbound: outbound})
+	}
+	middlewares = append(middlewares,
 		// Unified performance tracking middleware.
 		withoutResponsesRecoveryPenalty(withPerformanceRecording(outbound)),
 
@@ -424,6 +428,7 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 				persistCtx,
 				request,
 				err,
+				finalRequestResponseHeaders(persistCtx, state),
 			); updateErr != nil {
 				log.Warn(persistCtx, "Failed to update request status from error", log.Cause(updateErr))
 			}

@@ -28,8 +28,9 @@ func TestConfigWriteTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
-				RequestTimeout:    tt.requestTimeout,
-				LLMRequestTimeout: tt.llmTimeout,
+				RequestTimeout:          tt.requestTimeout,
+				LLMRequestTimeout:       tt.llmTimeout,
+				LLMStreamRequestTimeout: tt.llmTimeout,
 			}
 
 			if got := cfg.writeTimeout(); got != tt.want {

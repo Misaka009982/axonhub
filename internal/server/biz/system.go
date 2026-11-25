@@ -27,6 +27,7 @@ import (
 	"github.com/looplj/axonhub/internal/pkg/xerrors"
 	"github.com/looplj/axonhub/internal/pkg/xregexp"
 	"github.com/looplj/axonhub/internal/pkg/xtime"
+	"github.com/looplj/axonhub/internal/scopes"
 	"github.com/looplj/axonhub/internal/server/safeguards"
 	"github.com/looplj/axonhub/llm/httpclient"
 )
@@ -47,7 +48,7 @@ const (
 	// SystemKeySecretKey is the key used to store the secret key in the system table.
 	//
 	//nolint:gosec // Not a secret.
-	SystemKeySecretKey = "system_jwt_secret_key"
+	SystemKeySecretKey = scopes.SystemJWTSecretKey
 
 	// SystemKeyBrandName is the key for the brand name.
 	SystemKeyBrandName = "system_brand_name"
@@ -305,13 +306,11 @@ type RetryPolicy struct {
 	MaxSingleChannelRetries int `json:"max_single_channel_retries"`
 	// RetryDelayMs defines the delay between retries in milliseconds
 	RetryDelayMs int `json:"retry_delay_ms"`
-	// StreamFirstEventTimeoutSeconds defines the timeout for the first streaming response event in seconds.
-	// Set to 0 to disable. There is no upper bound; the effective ceiling is the
-	// server-level llm_request_timeout (AXONHUB_SERVER_LLM_REQUEST_TIMEOUT).
+	// StreamFirstEventTimeoutSeconds 是单次尝试等待首个流式事件的秒数，0 关闭。
+	// 不设上限；仍受流式总时限 llm_stream_request_timeout 及上游空闲时限约束。
 	StreamFirstEventTimeoutSeconds int `json:"stream_first_event_timeout_seconds"`
-	// NonStreamResponseTimeoutSeconds defines the timeout for non-streaming responses in seconds.
-	// Set to 0 to disable. There is no upper bound; the effective ceiling is the
-	// server-level llm_request_timeout (AXONHUB_SERVER_LLM_REQUEST_TIMEOUT).
+	// NonStreamResponseTimeoutSeconds 是单次尝试等待非流式响应完成的秒数，0 关闭。
+	// 不设上限；整次请求仍受 llm_request_timeout 约束。
 	NonStreamResponseTimeoutSeconds int `json:"non_stream_response_timeout_seconds"`
 	// LoadBalancerStrategy defines which channel load balancer strategy to use.
 	// Supported values: "adaptive", "failover", "circuit-breaker", "round-robin".
@@ -1231,9 +1230,8 @@ func normalizeRetryPolicy(policy *RetryPolicy) {
 		policy.TraceStickyMode = defaultRetryPolicy.TraceStickyMode
 	}
 
-	// Negative values mean "disabled". Values above the historical 600s bound are
-	// now honored as-is; the only remaining ceiling is the server-level
-	// llm_request_timeout applied to the whole request.
+	// 负值归 0 表示关闭，超过历史 600s 上限的值原样保留。
+	// 所选请求类型的总时限和已启用的上游流空闲时限仍独立生效。
 	if policy.StreamFirstEventTimeoutSeconds < 0 {
 		policy.StreamFirstEventTimeoutSeconds = 0
 	}

@@ -34,9 +34,8 @@ func NormalizeResponseTimeout(settings *objects.ChannelSettings) error {
 // that mode are ignored here because NormalizeResponseTimeout drops them before
 // they are stored.
 //
-// A configured timeout must be non-negative. There is no upper bound here:
-// the same rule the global retry policy uses, where the request-level
-// llm_request_timeout remains the effective ceiling.
+// 配置值必须非负，本层不设上限，与全局重试策略一致。
+// 流式与非流式各自的总时限，以及已启用的上游流空闲时限仍独立生效。
 func ValidateResponseTimeout(settings *objects.ChannelResponseTimeoutSettings) error {
 	if !settings.IsCustom() {
 		return nil

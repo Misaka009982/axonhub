@@ -14,6 +14,7 @@ import (
 	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/build"
 	"github.com/looplj/axonhub/internal/contexts"
+	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/scopes"
@@ -282,7 +283,7 @@ func (r *mutationResolver) CheckProviderQuotas(ctx context.Context) (bool, error
 }
 
 // ResetChannelQuotaNow is the resolver for the resetChannelQuotaNow field.
-func (r *mutationResolver) ResetChannelQuotaNow(ctx context.Context, channelID objects.GUID) (bool, error) {
+func (r *mutationResolver) ResetChannelQuotaNow(ctx context.Context, channelID objects.GUID, resetID *string) (bool, error) {
 	if !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
 		return false, fmt.Errorf("permission denied: requires write:channels scope")
 	}
@@ -291,7 +292,7 @@ func (r *mutationResolver) ResetChannelQuotaNow(ctx context.Context, channelID o
 		return false, fmt.Errorf("provider quota service is not available")
 	}
 
-	if err := r.providerQuotaService.ResetChannelQuotaNow(ctx, channelID.ID); err != nil {
+	if err := r.providerQuotaService.ResetChannelQuotaNow(ctx, channelID.ID, lo.FromPtr(resetID)); err != nil {
 		return false, fmt.Errorf("failed to reset channel quota: %w", err)
 	}
 
@@ -312,8 +313,10 @@ func (r *mutationResolver) TriggerGcCleanup(ctx context.Context, input gc.Trigge
 			}
 		}()
 
-		// Use a detached context with system bypass for background execution
-		bgCtx := authz.WithSystemBypass(context.WithoutCancel(ctx), "manual-gc-cleanup")
+		// WithoutCancel keeps context values. Let the worker open new transactions
+		// instead of reusing the GraphQL transaction, which closes with the mutation.
+		bgCtx := ent.NewTxContext(context.WithoutCancel(ctx), nil)
+		bgCtx = authz.WithSystemBypass(bgCtx, "manual-gc-cleanup")
 		_ = r.gcWorker.RunCleanupNow(bgCtx, input)
 	}()
 
@@ -386,7 +389,7 @@ func (r *mutationResolver) UpdateCatalogSettings(ctx context.Context, input Upda
 	}
 
 	if r.catalogService != nil {
-		r.catalogService.Invalidate()
+		r.catalogService.InvalidateAfterCommit(ctx)
 	}
 
 	return true, nil

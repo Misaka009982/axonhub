@@ -6,7 +6,7 @@
 > 上游仓库：`https://github.com/looplj/axonhub`（默认分支 `unstable`）
 > 本 fork：`https://github.com/Misaka009982/axonhub`
 > 定制起点：`v1.0.0-beta11`（commit `b8bb3421`）
-> 当前同步版本：`v1.0.0-rc.3`（commit `e70fb2a2`），从本地 rc2 提交 `58ae5568` 继续合并
+> 当前同步版本：`v1.0.0-rc.5`（commit `32e476e1`），从本地 rc3 修复提交 `128e69de` 继续合并，包含 rc4
 
 ---
 
@@ -36,9 +36,10 @@
 - 两项页面设置填 `0` → 只关闭各自的**单次尝试计时器**，不会关闭服务端总时限。
 - 填 `> 600` → 设置值不再被钳制；仍不能超过更早的请求级 deadline。
 - 首字计时器在首个流式事件到达后停止，不控制后续生成的总时长。
-- `server.llm_request_timeout` 默认 `3600s`，控制整个 LLM 请求（包括流式输出和重试）；显式填 `0` 可禁用本机这一层总时限。
-- `request_timeout` 或 `llm_request_timeout` 任一为非正值时，共享 HTTP 服务的 `WriteTimeout` 必须为 `0`，不能让另一类请求的有限写时限重新限制它。
-- 配置文件与环境变量优先于源码默认值；旧配置不会因升级而自动改变。客户端取消、父 context、上游及反代的限制仍然有效。
+- `server.llm_request_timeout` 默认 `3600s`，作为非流式 LLM 请求总时限；流式总时限未单独配置时继承它的有效值，包括旧配置或环境变量中的 `0`。
+- `server.llm_stream_request_timeout` 控制流式总时限（含重试），显式填写时优先；`server.llm_stream_idle_timeout` 控制上游连续无数据的间隔，本 fork 默认 `0` 关闭，不跟随上游的 `600s` 默认值。
+- 普通、非流式、流式总时限任一为非正值时，共享 HTTP 服务的 `WriteTimeout` 必须为 `0`，不能用另一类请求的有限写时限重新限制它。
+- 配置文件与环境变量优先于源码默认值；旧配置不会因升级而自动改变。客户端取消、父 context、上游及反代的限制仍然有效。rc5 的配置加载拒绝负的 LLM 总时限及空闲时限，请用 `0` 表示关闭。
 
 ### 后续反馈与本次修复边界
 
@@ -77,64 +78,56 @@ if policy.NonStreamResponseTimeoutSeconds > maxRetryResponseTimeoutSeconds {
 
 **c) 更新 `RetryPolicy` 结构体两处字段注释**：
 
-```go
-// Set to 0 to disable. There is no upper bound; the effective ceiling is the
-// server-level llm_request_timeout (AXONHUB_SERVER_LLM_REQUEST_TIMEOUT).
-```
+首字和非流式响应计时器各自支持 `0` 关闭、无 600 秒上限。字段注释应分别指向 `llm_stream_request_timeout` 和 `llm_request_timeout`；首字等待还可能受显式配置的 `llm_stream_idle_timeout` 影响。
 
 ### 2. `internal/server/middleware/timeout.go`
 
-`WithTimeout` 开头加早退，让 `<= 0` 表示"不设超时"：
+`WithTimeout` 保留 `ts <= 0` 早退及独有 cause，只禁用本机这一层，仍传播父级 deadline 与客户端取消。
 
-```go
-func WithTimeout(ts time.Duration) gin.HandlerFunc {
-    return func(c *gin.Context) {
-        if ts <= 0 {
-            c.Next()
-            return
-        }
+rc5 的 LLM HTTP 路由已改用上游 `WithLLMTimeout` / `SelectLLMTimeout`：正文解析前使用两类预算的较大值，任一预算为 `0` 则暂不设总时限；解析后从**最初到达时刻**计算所选类型的总预算。不能把路由退回旧 `WithTimeout`，否则会丢失独立流式预算和上游无限等待时的写保护。
 
-        timeoutCause := fmt.Errorf("server request timeout after %s: %w", ts, context.DeadlineExceeded)
-        ctx, cancel := context.WithTimeoutCause(c.Request.Context(), ts, timeoutCause)
-        // 保留 defer cancel()、请求 context 替换和 c.Next()
-    }
-}
-```
+保留以下定制：
 
-`c.Next()` 返回后，仅当 `context.Cause(ctx) == timeoutCause` 时记录
-`Server request timeout exceeded`，包含 `source=server_request_timeout`、路由模板、配置时限和实际耗时。这样不会把父级 deadline 或客户端取消误报为本层超时；不记录请求正文、查询参数或密钥。
+- 两类总时限各自持有独有 cause，使用 `context.WithDeadlineCause`；仅当请求 cause 与本机 cause 相同才记录 `Server request timeout exceeded`。
+- 来源仍为 `source=server_request_timeout`，LLM HTTP 路径额外包含 `config_key`（非流式或流式总时限），保留路由模板、配置时限、实际耗时；不把父级取消、上游空闲超时或正常收尾取消记成本机超时。
+- `WithStreamIdleTimeout`、`llmResponseWriter` 以及 API 的流式判定和 SSE 单次写保护均保留上游实现，不记录正文、查询参数或密钥，不重新加入独立请求阶段诊断。
 
 ### 3. `internal/server/config.go` 与 `internal/server/server.go`
 
-`Config.writeTimeout()` 必须把非正值当作“无时限”，而不是直接取数值最大值：
+`Config.writeTimeout()` 必须同时考虑普通、非流式、流式三类请求，且只保留一个方法定义：
 
 ```go
 func (c Config) writeTimeout() time.Duration {
-    if c.RequestTimeout <= 0 || c.LLMRequestTimeout <= 0 {
+    if c.RequestTimeout <= 0 || c.LLMRequestTimeout <= 0 || c.LLMStreamRequestTimeout <= 0 {
         return 0
     }
 
-    return max(c.RequestTimeout, c.LLMRequestTimeout)
+    return max(c.RequestTimeout, c.LLMRequestTimeout, c.LLMStreamRequestTimeout)
 }
 ```
 
-`Run()` 将 `srv.Config.writeTimeout()` 的返回值用于 `http.Server.WriteTimeout`。
-启动时的 `run server` 日志同时输出实际生效的 `request_timeout`、`llm_request_timeout` 和 `write_timeout`，不输出配置全文。
-
-保留路由上的 context 超时及 `api/chat.go` 的 SSE 单次写入保护，不使用 `context.WithoutCancel` 绕过父级 deadline。
+`Run()` 将该返回值用于 `http.Server.WriteTimeout`，保留上游的 `mountBasePath`。启动日志输出实际生效的 `request_timeout`、`llm_request_timeout`、`llm_stream_request_timeout`、`llm_stream_idle_timeout` 和 `write_timeout`，不输出配置全文。
 
 ### 4. `conf/conf.go`
 
-`setDefaults` 中：
+`setDefaults` 保留：
 
 ```go
-- v.SetDefault("server.llm_request_timeout", "600s")
-+ v.SetDefault("server.llm_request_timeout", "3600s")
+v.SetDefault("server.llm_request_timeout", "3600s")
+v.SetDefault("server.llm_stream_idle_timeout", "0s")
 ```
+
+在 `unmarshal` 的 `v.Unmarshal` **之前**按旧配置的有效值设置流式默认值：
+
+```go
+v.SetDefault("server.llm_stream_request_timeout", v.Get("server.llm_request_timeout"))
+```
+
+使用 `SetDefault` 而不是 `Set`，避免覆盖用户显式设置的新字段；也不能用“解析后值为 0”判断是否缺省，因为用户可能明确要求关闭。这样旧环境变量 `AXONHUB_SERVER_LLM_REQUEST_TIMEOUT=0` 在没有独立流式配置时仍关闭两类总时限，新流式配置的环境变量优先于 YAML。
 
 ### 5. `config.example.yml`
 
-示例值保持 `3600s`，注释明确它是整次请求总时限、`0` 仅禁用本机这一层，且环境变量优先。调整部署配置后需要重建/重启应用容器，不能只修改页面首字设置。
+非流式示例值保持 `3600s`，将 `llm_stream_request_timeout` 示例留在注释中以保留继承；新增 `llm_stream_idle_timeout: "0s"`。注释说明各自的 `0` 语义、旧配置继承与环境变量优先。若要单独配置流式总时限，再取消该字段的注释。部署配置修改由维护者重建/重启应用容器后生效。
 
 ### 6. `frontend/src/features/system/components/retry-settings.tsx`
 
@@ -148,21 +141,21 @@ func (c Config) writeTimeout() time.Duration {
 - `system.retry.streamFirstEventTimeoutSeconds.description`
 - `system.retry.nonStreamResponseTimeoutSeconds.description`
 
-文案说明支持超过 `600s`、首个事件到达后首字计时器停止、页面 `0` 只关闭对应计时器，以及独立的 `server.llm_request_timeout`（默认 `3600s`，需在服务端配置中另设 `0` 才能禁用）。
+文案说明支持超过 `600s`、首个事件到达后首字计时器停止、页面 `0` 只关闭对应计时器。流式总时限指向 `server.llm_stream_request_timeout`（未单独配置时继承默认 `3600s` 的旧配置），并说明独立的上游流空闲超时默认关闭；非流式总时限指向 `server.llm_request_timeout`。
 （历史版本可能有 `zh.json`，当前为 `zh-CN` + `en`。）
 
 ### 8. 回归覆盖
 
-- `internal/server/config_timeout_test.go`：任一类请求禁用超时时，全局写时限必须为 `0`；两者为正时取最大值，支持超过 `600s`。
-- `internal/server/middleware/timeout_test.go`：禁用不创建 deadline，仍传播客户端取消与父级 deadline；超过 `600s` 不钳制；本层超时保留可识别 cause，`ctx.Err()` 仍为 `context.DeadlineExceeded`。
-- `conf/conf_test.go` 的 `TestLLMRequestTimeoutConfig`：默认 `3600s`，显式 `600s` 不会被默认值覆盖，环境变量 `0` / `7200s` 可覆盖配置。
+- `internal/server/config_timeout_test.go` 与上游 `server_timeout_test.go`：三类请求任一禁用时全局写时限为 `0`，全部为正时取最大值，支持超过 `600s`。
+- `internal/server/middleware/timeout_test.go`：合并两边用例，覆盖旧 `WithTimeout`、新 `WithLLMTimeout` / `SelectLLMTimeout` 的独立预算、准备耗时、超过 `600s`、客户端取消和父级 deadline；本层超时保留独有 cause，`ctx.Err()` 仍为 `context.DeadlineExceeded`。
+- `conf/conf_test.go`：默认两类总时限均为 `3600s`、空闲超时为 `0`；旧 YAML / 环境变量的 `0` 与超 600 秒值可继承；新配置显式 `0`、有限值及环境变量覆盖均不被继承逻辑覆盖；保留上游负值校验。
 - `internal/server/biz/system_test.go` 的 `TestNormalizeRetryPolicy_ResponseTimeouts`：负值归 `0`，`601`、`900`、`7200` 原样保留。
 
 本次只做静态审查，未运行以上测试；上游同步后应由维护者执行。
 
 ### 9. `internal/build/VERSION`
 
-从 rc2 起，每次同步正式标签时，将此文件更新为对应的完整版本号；当前为 `v1.0.0-rc.3`。版本拼写以实际标签为准，rc3 的标签在 `rc` 与 `3` 之间带有点号。
+从 rc2 起，每次同步正式标签时，将此文件更新为对应的完整版本号；当前为 `v1.0.0-rc.5`。版本拼写以实际标签为准，rc3～rc5 的标签在 `rc` 与数字之间带有点号。
 
 `internal/build/info.go` 将该文件嵌入为默认版本，`Dockerfile` 也直接读取它并注入 `build.Version`。因此从 `main` 自行构建时，必须同步更新此文件，避免代码已升级但页面和版本接口仍显示 beta9。发布工作流显式注入版本时，仍以注入值为准。
 
@@ -176,7 +169,7 @@ go: go.mod requires go >= 1.27.4 (running go 1.27.3; GOTOOLCHAIN=local)
 
 原因是官方镜像默认 `GOTOOLCHAIN=local`，`GOTOOLCHAIN=auto go build` 只影响该命令，不会传给 `&&` 后的校验脚本；自测使用模拟的 `go`，也不会检查真实工具链版本。
 
-本 fork 采用 rc3 标签发布后合并的上游 [PR #2983](https://github.com/looplj/axonhub/pull/2983) 中的 Dockerfile 修复，将后端镜像更新为 `golang:1.27.4-alpine3.24`，与模块要求对齐，保留所有依赖校验。这里只同步该文件的版本修正。
+本 fork 在 rc3 后采用上游 [PR #2983](https://github.com/looplj/axonhub/pull/2983) 的 Dockerfile 修复，将后端镜像更新为 `golang:1.27.4-alpine3.24`，保留全部依赖校验。rc5 已完整包含该上游修复，本次 Dockerfile 与 rc5 一致，四个被校验模块均要求 Go `1.27.4`，不再另行修改镜像。
 
 后续同步时，核对构建镜像的 Go 版本不低于 `scripts/verify-go-sse-dependency.sh` 遍历的各模块要求；不能仅确认 `go build` 带有自动工具链选项。重建后的日志应继续出现四个模块的 `verified module dependency` 和最终的 `verified production binary dependency`。本次仅做静态核对，实际镜像构建由维护者执行。
 
@@ -197,13 +190,13 @@ grep -rn "0-600s" frontend/src/locales/
 grep -rn "max='600'" frontend/src/features/system/components/retry-settings.tsx
 
 # 4. 服务端默认超时
-grep -rn "llm_request_timeout" conf/conf.go config.example.yml
+grep -rn "llm_request_timeout\|llm_stream_request_timeout\|llm_stream_idle_timeout" conf/conf.go config.example.yml
 
 # 5. 0 值语义是否被破坏
-grep -n "ts <= 0" internal/server/middleware/timeout.go
+grep -n "ts <= 0\|timeout <= 0" internal/server/middleware/timeout.go
 
-# 6. 全局写时限是否保留 0 值语义，以及运行值和超时来源日志
-grep -n "writeTimeout\|request_timeout" internal/server/config.go internal/server/server.go internal/server/middleware/timeout.go
+# 6. 全局写时限、运行值和超时来源日志
+grep -n "writeTimeout\|request_timeout\|config_key" internal/server/config.go internal/server/server.go internal/server/middleware/timeout.go
 
 # 7. 渠道级响应超时是否又被钳到 600
 grep -rn "maxRetryResponseTimeoutSeconds" internal/server/biz/channel_response_timeout.go
@@ -223,14 +216,14 @@ grep -n '^go ' go.mod llm/go.mod cmd/schema/go.mod cmd/axonhub-desktop/go.mod
 git status --short
 ```
 
-第 1～3 项应无匹配；第 4 项应看到 `3600s` 默认值；第 5～6 项应有对应逻辑；第 9 项当前应为 `v1.0.0-rc.3`；第 10 项镜像 Go 版本应满足所有被校验模块的最低要求。不要把“无输出”一律当作失败。
+第 1～3 项应无匹配；第 4 项应看到总时限 `3600s`、流式有效值继承和空闲默认 `0s`；第 5～6 项应有对应逻辑；第 9 项当前应为 `v1.0.0-rc.5`；第 10 项镜像 Go 版本应满足所有被校验模块的最低要求。不要把“无输出”一律当作失败。
 
 ---
 
 ## 现场核对与部署设置
 
-1. 查看启动日志 `run server` 的三个超时字段，确认**实际生效值**，而不是只看源码默认值。没有这三个字段说明运行产物未包含本次诊断改动。
-2. 同一请求若出现 `Server request timeout exceeded` 且 `source=server_request_timeout`，表示本机路由总时限触发，`timeout` 是配置时限。父级 deadline、上游返回的错误与客户端取消不会被这个标记误认。
+1. 查看启动日志 `run server` 的五个超时字段，确认**实际生效值**，而不是只看源码默认值。旧版本只有三个字段，缺少新流式字段时应核对实际构建提交。
+2. 同一请求若出现 `Server request timeout exceeded` 且 `source=server_request_timeout`，表示本机总时限触发，`timeout` 是配置时限；LLM HTTP 路径的 `config_key` 可区分流式和非流式。父级 deadline、上游空闲超时与客户端取消不会被这个标记误认。WebSocket 的每轮总时限沿用上游处理，不依赖这条 HTTP 中间件日志。
 3. `Stream deadline exceeded` 表示流式 writer 观察到请求 context 到期；还应结合上面的来源标记判断是哪层。只有 `Error in stream` 或响应内的超时文本时，不能仅凭错误字符串断定是 AxonHub 的总计时器。
 4. 页面仍出现 `(0-600s)` 时，核对容器镜像 ID/digest、是否已重建应用容器、前端是否随同构建，以及反代/CDN/浏览器是否仍提供旧资源。仓库的 `Dockerfile` 会构建前端并嵌入后端；`docker-unstable.yml` 固定构建 `unstable`，不是 `main`。
 5. 若需要关闭 AxonHub 的 LLM 总时限，在现有应用服务的 `environment` 中设置以下一项（**合并到原配置，不覆盖其他环境变量**），然后由维护者重建应用容器：
@@ -240,7 +233,7 @@ environment:
   AXONHUB_SERVER_LLM_REQUEST_TIMEOUT: "0"
 ```
 
-也可以设置 `config.yml` 的 `server.llm_request_timeout: "0s"`，但同名环境变量优先。这个设置不会关闭客户端、上游或反代的时限，也不会关闭 SSE 单次写入保护。
+也可以设置 `config.yml` 的 `server.llm_request_timeout: "0s"`，但同名环境变量优先。未单独配置流式总时限时会继承这个 `0`；若已显式设置 `llm_stream_request_timeout`，还需将它设为 `0`。若启用了 `llm_stream_idle_timeout` 且要关闭它，也应另设为 `0`。这些设置不会关闭客户端、上游或反代的时限，也不会关闭 SSE 单次写入保护。
 
 若要同时关闭页面的两项计时器，再分别设为 `0`；若要让首字等待 `900s`，页面填 `900`，并确保总时限足够大或已禁用。首字耗时与总耗时是不同指标。
 
@@ -253,7 +246,7 @@ environment:
 - **`middleware.WithTimeout` 是公共函数**，`request_timeout`（默认 30s）也走它。
   改成 `<= 0` 不超时后，**若把 `request_timeout` 设为 0，管理 API 也会失去超时保护**。
   默认值未变（仍 30s），只在用户显式填 0 时行为改变。
-- 两类总时限都为正时，`http.Server.WriteTimeout` 取二者最大值；任一非正时，全局写时限为 `0`，其他路由的有限 context 时限仍保留。长连接会更久占用资源，应结合并发限制使用。
+- 普通、非流式、流式总时限全部为正时，`http.Server.WriteTimeout` 取三者最大值；任一非正时，全局写时限为 `0`，其他路由的有限 context 时限仍保留。长连接会更久占用资源，应结合并发限制使用。
 - `deploy/nginx.conf` 里 `location /v1/` 仍有 `proxy_read_timeout 600s`。
   这是**上游连续无数据的读取间隔**，不是固定的请求总时长；如有长时间静默，需要部署者单独调整。
 - 上游若给 `RetryPolicy` 加了新的钳制逻辑，注意别把这次的放开又覆盖回去。
@@ -275,16 +268,16 @@ environment:
 | `frontend/src/locales/{en,zh-CN}/channels.json` | `responseTimeout.validation` 写 `0 到 600` | 去掉 600 |
 | `internal/server/biz/channel_response_timeout_test.go` | 用 `601` 断言拒绝 | 改为断言 **接受** 601/7200，用 `-1` 断言拒绝 |
 
-语义保持与全局一致：`0` = 关闭该计时器，非负值照填；真正的天花板仍是 `server.llm_request_timeout`。
+语义保持与全局一致：`0` = 关闭该计时器，非负值照填；流式请求仍受 `server.llm_stream_request_timeout` 及显式配置的上游空闲时限约束，非流式请求仍受 `server.llm_request_timeout` 约束。
 
 ---
 
 ## 分支说明
 
 - 本 fork 上游分支为 `unstable`；本地定制维护在 `main` 分支。
-- 当前从 rc2 合并提交 `58ae5568eb6acd7578bfd93f592031945ec1cc92` 继续合并正式标签 `v1.0.0-rc.3`（`e70fb2a2676a0d9374a4665bc52accddd979a4d9`），保留现有超时定制和 rc1 的撤销结果。
+- 当前从 rc3 构建修复提交 `128e69de80dfd0daba9781564d46b079dd186fa3` 继续合并正式标签 `v1.0.0-rc.5`（`32e476e1c79a548997d7501976c162e94a81afc3`），包含 rc4，保留现有超时定制和 rc1 的撤销结果。
 - `origin` 指向本 fork；同步上游时先从 `https://github.com/looplj/axonhub.git` 获取指定标签，再合并该标签，避免把 fork 的旧 `unstable` 当作最新上游。
-- 上游 `internal/build/VERSION` 在 rc3 中仍写着 `v1.0.0-beta9`；本 fork 已更新为 `v1.0.0-rc.3`，今后随同步标签维护，并结合提交核对源码版本。
+- 上游 `internal/build/VERSION` 在 rc5 中仍写着 `v1.0.0-beta9`；本 fork 已更新为 `v1.0.0-rc.5`，今后随同步标签维护，并结合提交核对源码版本。
 
 ---
 
@@ -341,3 +334,17 @@ environment:
 - 吸收上游 DeepSeek 额度显示、Trace/Thread 身份缓存、HTTP/2 断流及 GOAWAY 重试、配额回退选路、桌面端和插件页面修复。
 - 上游新加入的身份缓存属于 rc3 原有实现；不重新纳入此前取消的 `b68c57a3` / `e38f073b` 请求补记和独立阶段诊断。
 - 静态核对超时定制补丁、版本读取路径、撤销范围、UTF-8/JSON 和 Git 差异；未编译、运行测试、安装依赖或部署。
+
+---
+
+## rc5 同步记录（包含 rc4）
+
+- 同步起点：`128e69de80dfd0daba9781564d46b079dd186fa3`（rc3 加 Docker Go 版本修复）。
+- 上游目标：`v1.0.0-rc.5`，提交 `32e476e1c79a548997d7501976c162e94a81afc3`；已确认包含 `v1.0.0-rc.4`（`824427782241086f3a3632c5e451cdfd0d62c819`）。累计 83 个提交、698 个上游文件，直接正常合并，不重写 main 历史。
+- 本地回退分支：`backup/pre-rc5-128e69de`；仓库外记录：`D:/Project/axonhub/backups/pre-rc5-128e69de/README.md`。更早的 rc1 完整备份继续保留。
+- 解决配置、共享写时限、超时中间件和测试的 6 处冲突，保留上游拆分预算、无限等待的写保护、API 流式判定与 WebSocket 每轮时限。
+- 用户已确认兼容策略：旧总时限默认 `3600s`，未显式配置的流式总时限继承旧有效值；新流空闲超时默认 `0`，显式新配置优先。页面和渠道的超 600 秒设置继续生效，原总超时来源日志扩展到新中间件。
+- 吸收上游正文分块去重、模型目录/参考价格同步、渠道定时禁用与配额管理、插件任务/表/中间件、URL 前缀和 WebSocket 传输等更新；不重新纳入已取消的 `b68c57a3` / `e38f073b` 本地补丁。
+- `internal/build/VERSION` 更新为准确标签 `v1.0.0-rc.5`；Dockerfile 与 rc5 一致，构建镜像和各产品模块均为 Go `1.27.4`。
+- 沿用及扩展现有超时测试，验证限于静态源码、定制范围、UTF-8/JSON、版本和 Git 差异；未编译、运行测试、安装依赖或部署，也未对全部上游代码逐行审计。全量合并检查报告上游字体许可证的一处尾随空白，已确认与 rc5 原文一致并保留；本地定制差异单独检查。
+- **部署前备份实际数据库和数据卷**：rc5 有请求正文分块、插件等新表/字段。源码回退不等于数据库回退，不应直接把升级后的库交给旧镜像。本次同步不操作数据库或部署配置。

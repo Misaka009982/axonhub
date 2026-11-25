@@ -154,6 +154,9 @@ func unmarshal(v *viper.Viper) (Config, error) {
 	// Set the parsed log level back to viper for unmarshaling
 	v.Set("log.level", int(logLevel))
 
+	// 未显式设置流式总时限时继承旧配置；默认值不会覆盖 YAML 或环境变量。
+	v.SetDefault("server.llm_stream_request_timeout", v.Get("server.llm_request_timeout"))
+
 	var config Config
 	if err := v.Unmarshal(&config, func(dc *mapstructure.DecoderConfig) {
 		dc.DecodeHook = customizedDecodeHook
@@ -161,6 +164,22 @@ func unmarshal(v *viper.Viper) (Config, error) {
 	}); err != nil {
 		return Config{}, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+
+	if config.APIServer.LLMRequestTimeout < 0 {
+		return Config{}, fmt.Errorf("server.llm_request_timeout must not be negative")
+	}
+	if config.APIServer.LLMStreamRequestTimeout < 0 {
+		return Config{}, fmt.Errorf("server.llm_stream_request_timeout must not be negative")
+	}
+	if config.APIServer.LLMStreamIdleTimeout < 0 {
+		return Config{}, fmt.Errorf("server.llm_stream_idle_timeout must not be negative")
+	}
+
+	basePath, err := server.NormalizeBasePath(config.APIServer.BasePath)
+	if err != nil {
+		return Config{}, err
+	}
+	config.APIServer.BasePath = basePath
 
 	config.APIServer.Safeguards.ClassifierModel = strings.TrimSpace(config.APIServer.Safeguards.ClassifierModel)
 	seenReviewers := map[string]bool{config.APIServer.Safeguards.ClassifierModel: true}
@@ -253,10 +272,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.name", "AxonHub")
 	v.SetDefault("server.base_path", "")
 	v.SetDefault("server.request_timeout", "30s")
-	// LLM requests may legitimately outlive the first streaming event (long
-	// generations), so the default ceiling is generous. Set to 0 to disable the
-	// server-imposed LLM request timeout entirely.
+	// 保留较长的默认总时限；流式总时限在 unmarshal 中继承其有效值。
 	v.SetDefault("server.llm_request_timeout", "3600s")
+	// 上游持续无数据的间隔另行配置，默认不增加新的 600s 限制。
+	v.SetDefault("server.llm_stream_idle_timeout", "0s")
 	v.SetDefault("server.sse_keep_alive.enabled", false)
 	v.SetDefault("server.sse_keep_alive.interval", "15s")
 	v.SetDefault("server.trace.thread_header", "AH-Thread-Id")

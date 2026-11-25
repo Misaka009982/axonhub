@@ -210,6 +210,8 @@ func TestTraceExtractionDefaultsToEnabled(t *testing.T) {
 
 func TestLLMRequestTimeoutConfig(t *testing.T) {
 	t.Setenv("AXONHUB_SERVER_REQUEST_TIMEOUT", "")
+	t.Setenv("AXONHUB_SERVER_LLM_STREAM_REQUEST_TIMEOUT", "")
+	t.Setenv("AXONHUB_SERVER_LLM_STREAM_IDLE_TIMEOUT", "")
 
 	tests := []struct {
 		name   string
@@ -234,6 +236,12 @@ func TestLLMRequestTimeoutConfig(t *testing.T) {
 			}
 			if cfg.APIServer.LLMRequestTimeout != tt.want {
 				t.Fatalf("LLM总时限 = %s，期望 %s", cfg.APIServer.LLMRequestTimeout, tt.want)
+			}
+			if cfg.APIServer.LLMStreamRequestTimeout != tt.want {
+				t.Fatalf("未单独配置的流式总时限 = %s，期望继承 %s", cfg.APIServer.LLMStreamRequestTimeout, tt.want)
+			}
+			if cfg.APIServer.LLMStreamIdleTimeout != 0 {
+				t.Fatalf("流空闲超时默认应关闭，实际为 %s", cfg.APIServer.LLMStreamIdleTimeout)
 			}
 			if cfg.APIServer.RequestTimeout != 30*time.Second {
 				t.Fatalf("管理请求超时 = %s，期望 30s", cfg.APIServer.RequestTimeout)
@@ -375,5 +383,91 @@ func TestSafeguardsEscalationYAML(t *testing.T) {
 	}
 	if !cfg.APIServer.Safeguards.EscalateOnDenial {
 		t.Fatal("YAML escalation toggle ignored")
+	}
+}
+
+func TestLLMTimeoutConfig(t *testing.T) {
+	t.Setenv("AXONHUB_SERVER_LLM_REQUEST_TIMEOUT", "")
+	t.Setenv("AXONHUB_SERVER_LLM_STREAM_REQUEST_TIMEOUT", "")
+	t.Setenv("AXONHUB_SERVER_LLM_STREAM_IDLE_TIMEOUT", "")
+	for _, tt := range []struct {
+		name, config          string
+		request, stream, idle time.Duration
+		invalid               bool
+	}{
+		{"defaults", "", time.Hour, time.Hour, 0, false},
+		{"disabled", "server:\n  llm_request_timeout: 0s\n  llm_stream_request_timeout: 0s\n  llm_stream_idle_timeout: 0s\n", 0, 0, 0, false},
+		{"custom", "server:\n  llm_request_timeout: 5m\n  llm_stream_request_timeout: 40m\n  llm_stream_idle_timeout: 20s\n", 5 * time.Minute, 40 * time.Minute, 20 * time.Second, false},
+		{"negative total", "server:\n  llm_request_timeout: -1s\n", 0, 0, 0, true},
+		{"negative streaming total", "server:\n  llm_stream_request_timeout: -1s\n", 0, 0, 0, true},
+		{"independent streaming disable", "server:\n  llm_stream_request_timeout: 0s\n", time.Hour, 0, 0, false},
+		{"legacy disable inherited by stream", "server:\n  llm_request_timeout: 0s\n", 0, 0, 0, false},
+		{"numeric legacy disable", "server:\n  llm_request_timeout: 0\n", 0, 0, 0, false},
+		{"independent non-streaming disable", "server:\n  llm_request_timeout: 0s\n  llm_stream_request_timeout: 1800s\n", 0, 1800 * time.Second, 0, false},
+		{"idle above historical ceiling", "server:\n  llm_stream_idle_timeout: 900s\n", time.Hour, time.Hour, 900 * time.Second, false},
+		{"negative idle", "server:\n  llm_stream_idle_timeout: -1s\n", 0, 0, 0, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, _, err := loadConfig(writeTestConfig(t, tt.config))
+			if tt.invalid {
+				if err == nil {
+					t.Fatal("expected invalid timeout error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("loadConfig() error = %v", err)
+			}
+			if cfg.APIServer.LLMRequestTimeout != tt.request || cfg.APIServer.LLMStreamRequestTimeout != tt.stream || cfg.APIServer.LLMStreamIdleTimeout != tt.idle {
+				t.Fatalf("LLM timeouts = (%s, %s, %s), want (%s, %s, %s)", cfg.APIServer.LLMRequestTimeout, cfg.APIServer.LLMStreamRequestTimeout, cfg.APIServer.LLMStreamIdleTimeout, tt.request, tt.stream, tt.idle)
+			}
+		})
+	}
+}
+
+func TestLLMTimeoutConfigFromEnvironment(t *testing.T) {
+	for _, tt := range []struct {
+		name, config, requestEnv, streamEnv, idleEnv string
+		request, stream, idle                       time.Duration
+	}{
+		{"legacy disable", "server:\n  llm_request_timeout: 600s\n", "0", "", "", 0, 0, 0},
+		{"legacy extension", "server:\n  llm_request_timeout: 600s\n", "7200s", "", "", 2 * time.Hour, 2 * time.Hour, 0},
+		{"explicit stream and idle", "", "0s", "25m", "45s", 0, 25 * time.Minute, 45 * time.Second},
+		{"explicit YAML stream", "server:\n  llm_stream_request_timeout: 900s\n", "0", "", "", 0, 900 * time.Second, 0},
+		{"stream environment disables YAML", "server:\n  llm_stream_request_timeout: 1800s\n", "3600s", "0", "", time.Hour, 0, 0},
+		{"stream environment extends YAML", "server:\n  llm_stream_request_timeout: 1800s\n", "3600s", "7200s", "", time.Hour, 2 * time.Hour, 0},
+		{"idle environment disables YAML", "server:\n  llm_stream_idle_timeout: 600s\n", "3600s", "", "0", time.Hour, time.Hour, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AXONHUB_SERVER_LLM_REQUEST_TIMEOUT", tt.requestEnv)
+			t.Setenv("AXONHUB_SERVER_LLM_STREAM_REQUEST_TIMEOUT", tt.streamEnv)
+			t.Setenv("AXONHUB_SERVER_LLM_STREAM_IDLE_TIMEOUT", tt.idleEnv)
+			cfg, _, err := loadConfig(writeTestConfig(t, tt.config))
+			if err != nil {
+				t.Fatalf("加载超时配置失败：%v", err)
+			}
+			if cfg.APIServer.LLMRequestTimeout != tt.request || cfg.APIServer.LLMStreamRequestTimeout != tt.stream || cfg.APIServer.LLMStreamIdleTimeout != tt.idle {
+				t.Fatalf("LLM 时限 = (%s, %s, %s)，期望 (%s, %s, %s)", cfg.APIServer.LLMRequestTimeout, cfg.APIServer.LLMStreamRequestTimeout, cfg.APIServer.LLMStreamIdleTimeout, tt.request, tt.stream, tt.idle)
+			}
+		})
+	}
+}
+
+func TestServerBasePathConfig(t *testing.T) {
+	configFile := writeTestConfig(t, "server:\n  base_path: /tools/axonhub/\n")
+	cfg, _, err := loadConfig(configFile)
+	if err != nil || cfg.APIServer.BasePath != "/tools/axonhub" {
+		t.Fatalf("YAML base_path = %q, error = %v", cfg.APIServer.BasePath, err)
+	}
+
+	t.Setenv("AXONHUB_SERVER_BASE_PATH", "/gateway/")
+	cfg, _, err = loadConfig(configFile)
+	if err != nil || cfg.APIServer.BasePath != "/gateway" {
+		t.Fatalf("environment base_path = %q, error = %v", cfg.APIServer.BasePath, err)
+	}
+
+	t.Setenv("AXONHUB_SERVER_BASE_PATH", "https://example.com")
+	if _, _, err = loadConfig(configFile); err == nil {
+		t.Fatal("invalid base_path was accepted")
 	}
 }
